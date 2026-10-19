@@ -1,0 +1,16 @@
+filebeat.inputs:
+  - type: filestream
+    id: shop-json
+    paths: [/var/log/shop/*.jsonl]
+    parsers:
+      - ndjson:
+          target: ''
+          overwrite_keys: true
+          add_error_key: true
+setup.ilm.enabled: false
+setup.template.name: taller
+setup.template.pattern: taller-*
+output.elasticsearch:
+  hosts: [http://elasticsearch:9200]
+  index: taller-logs
+logging.level: warning

@@ -1,0 +1,108 @@
+name: Tienda · CI y entrega
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1-5'
+concurrency:
+  group: shop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.13'}
+      - run: python scripts/scan_secrets.py
+      - run: python -m pip install -r backend/requirements-dev.lock
+      - run: python -m ruff check backend/app backend/tests
+      - run: python -m pip_audit -r backend/requirements.lock
+  backend:
+    needs: checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: shop, POSTGRES_PASSWORD: ci-only-test-db, POSTGRES_DB: shop_ci}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U shop -d shop_ci" --health-interval 5s --health-timeout 3s --health-retries 20
+    defaults:
+      run: {working-directory: backend}
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://shop:ci-only-test-db@localhost:5432/shop_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.13'}
+      - run: python -m pip install -r requirements-dev.lock
+      - run: python -m pytest --junitxml=results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: backend-results, path: backend/results.xml}
+  frontend:
+    needs: checks
+    runs-on: ubuntu-latest
+    defaults:
+      run: {working-directory: frontend}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22', cache: npm, cache-dependency-path: frontend/package-lock.json}
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm test
+      - run: npm run build
+  e2e:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.13'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: python -m pip install -r backend/requirements-dev.lock
+      - run: cd frontend && npm ci && npx playwright install --with-deps chromium
+      - name: Arrancar entorno de prueba
+        run: |
+          cd backend
+          python -m app.manage migrate
+          python -m app.manage seed
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/shop-api.log 2>&1 &
+          cd ../frontend
+          nohup npm run dev -- --port 5173 > /tmp/shop-web.log 2>&1 &
+          python -c "import time,urllib.request; [(time.sleep(1)) for _ in range(8)]; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+      - run: cd frontend && npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: browser-report, path: frontend/playwright-report}
+  package:
+    needs: e2e
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: cd frontend && npm ci && npm run build
+      - run: tar -czf frontend.tar.gz -C frontend/dist . && sha256sum frontend.tar.gz > frontend.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with: {name: web-package, path: 'frontend.tar.gz*'}
+  deploy:
+    needs: package
+    if: github.ref == 'refs/heads/main' && vars.RENDER_DEPLOY_HOOK_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: web-package}
+      - run: sha256sum -c frontend.tar.gz.sha256
+      - name: Pedir despliegue de la revisión comprobada
+        env: {RENDER_DEPLOY_HOOK: '${{ secrets.RENDER_DEPLOY_HOOK }}', COMMIT: '${{ github.sha }}'}
+        run: |
+          test -n "$RENDER_DEPLOY_HOOK"
+          curl --fail --silent --show-error -X POST "${RENDER_DEPLOY_HOOK}&ref=${COMMIT}"

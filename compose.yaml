@@ -1,0 +1,88 @@
+name: tienda-online
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: '3'}
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_DB: shop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Ejecuta scripts/preparar.ps1 o define POSTGRES_PASSWORD}
+    ports: ['127.0.0.1:${DB_PORT:-15432}:5432']
+    volumes: [shop-db:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U shop -d shop]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://shop:${POSTGRES_PASSWORD}@db:5432/shop
+      CORS_ORIGIN: http://localhost:${WEB_PORT:-15173},http://127.0.0.1:${WEB_PORT:-15173}
+      PUBLIC_WEB_URL: http://localhost:${WEB_PORT:-15173}
+      PAYMENT_MODE: ${PAYMENT_MODE:-demo}
+      COOKIE_SECURE: 'false'
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      APP_VERSION: ${APP_VERSION:-local}
+    ports: ['127.0.0.1:${API_PORT:-18000}:8000']
+    depends_on:
+      db: {condition: service_healthy}
+    volumes: [shop-logs:/app/logs]
+    logging: *logging
+  frontend:
+    build:
+      context: ./frontend
+      args: {VITE_API_URL: /api}
+    ports: ['127.0.0.1:${WEB_PORT:-15173}:8080']
+    depends_on:
+      backend: {condition: service_healthy}
+    logging: *logging
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.6
+    profiles: [observability]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ['127.0.0.1:19200:9200']
+    volumes: [elastic-data:/usr/share/elasticsearch/data]
+    mem_limit: 1536m
+    healthcheck:
+      test: [CMD-SHELL, curl -fs http://localhost:9200/_cluster/health]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+    logging: *logging
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.6
+    profiles: [observability]
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY:-}
+      TELEMETRY_ENABLED: 'false'
+    ports: ['127.0.0.1:15601:5601']
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+    mem_limit: 1536m
+    logging: *logging
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.17.6
+    profiles: [observability]
+    user: root
+    command: [filebeat, -e, --strict.perms=false]
+    volumes:
+      - ./observability/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - shop-logs:/var/log/shop:ro
+      - filebeat-data:/usr/share/filebeat/data
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+    logging: *logging
+volumes:
+  shop-db:
+  shop-logs:
+  elastic-data:
+  filebeat-data:

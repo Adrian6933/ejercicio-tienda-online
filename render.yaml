@@ -1,0 +1,45 @@
+databases:
+  - name: taller-db
+    databaseName: shop
+    user: shop
+    region: frankfurt
+    plan: free
+services:
+  - type: web
+    name: taller-api
+    runtime: docker
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: {name: taller-db, property: connectionString}
+      - key: CORS_ORIGIN
+        sync: false
+      - key: PUBLIC_WEB_URL
+        sync: false
+      - key: COOKIE_SECURE
+        value: 'true'
+      - key: PAYMENT_MODE
+        value: stripe
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+  - type: web
+    name: taller-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
